@@ -19,6 +19,7 @@
 
 void modify_event(int epollFd, int fd, int state);
 void delete_event(int epollFd, int fd, int state);
+void add_event(int epollFd, int fd, int state);
 
 int main(int argc, char *argv[])
 {
@@ -76,6 +77,7 @@ int main(int argc, char *argv[])
         close(socketFd);
         exit(EXIT_FAILURE);
     }
+    add_event(epollFd, STDIN_FILENO, EPOLLIN);
 
     int i;
     int fd;
@@ -83,7 +85,8 @@ int main(int argc, char *argv[])
     socklen_t addrLen;
     struct epoll_event ev;
     bzero(&ev, sizeof(ev));
-    while (1)
+    int flag = 1;
+    while (flag)
     {
         ret = epoll_wait(epollFd, events, MAX_EVENTS, -1);
 
@@ -106,6 +109,12 @@ int main(int argc, char *argv[])
                    ev.events = EPOLLIN;
                    epoll_ctl(epollFd, EPOLL_CTL_ADD, connFd, &ev);
                }
+            }
+            else if ((fd == STDIN_FILENO) && (events[i].events & EPOLLIN))
+            {
+                ret = read(fd, buf, BUF_SIZE);
+                buf[ret - 1] = 0;
+                printf("You enter a message: %s\n", buf);
             }
             else if (events[i].events & EPOLLIN)
             {
@@ -163,4 +172,12 @@ void modify_event(int epollFd, int fd, int state)
     ev.events = state;
     ev.data.fd = fd;
     epoll_ctl(epollFd, EPOLL_CTL_MOD, fd, &ev);
+}
+
+void add_event(int epollFd, int fd, int state)
+{
+    struct epoll_event ev;
+    ev.events = state;
+    ev.data.fd = fd;
+    epoll_ctl(epollFd, EPOLL_CTL_ADD, fd, &ev);
 }
