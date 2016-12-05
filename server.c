@@ -14,6 +14,11 @@
 #define PORT 8888
 #define BACKLOG 1024
 #define MAX_EVENTS 500
+#define BUF_SIZE 1024
+#define IP_ADDR "127.0.0.1"
+
+void modify_event(int epollFd, int fd, int state);
+void delete_event(int epollFd, int fd, int state);
 
 int main(int argc, char *argv[])
 {
@@ -27,11 +32,10 @@ int main(int argc, char *argv[])
     struct sockaddr_in serverAddr, clientAddr;
     bzero(&serverAddr, sizeof(struct sockaddr_in));
     bzero(&clientAddr, sizeof(struct sockaddr_in));
-    int addrLen = sizeof(clientAddr);
 
     serverAddr.sin_family = AF_INET;
     serverAddr.sin_port = htons(PORT);
-    serverAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    serverAddr.sin_addr.s_addr = inet_addr(IP_ADDR);
 
     if (-1 == bind(socketFd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)))
     {
@@ -46,16 +50,17 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
-    struct epoll_event event;
-    struct epoll_event wait_event;
-    bzero(&event, sizeof(struct epoll_event));
-    bzero(&wait_event, sizeof(struct epoll_event));
+    struct epoll_event eventListenFd;
+    struct epoll_event events[MAX_EVENTS];
+    bzero(events, sizeof(events));
+    bzero(&eventListenFd, sizeof(eventListenFd));
+    eventListenFd.data.fd = socketFd;
+    eventListenFd.events = EPOLLIN;
 
-    int fd[OPEN_MAX];
-    memset(fd, -1, sizeof(fd));
-    fd[0] = socketFd;
+    char buf[BUF_SIZE];
+    bzero(buf, sizeof(buf));
 
-    int epollFd = epoll_create(MAX_EVENTS); //argument is ignored, greater than 0 is ok.
+    int epollFd = epoll_create(OPEN_MAX); //argument is ignored, greater than 0 is ok.
     if (-1 == epollFd)
     {
         perror("epoll_create()");
@@ -63,10 +68,8 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
-    event.data.fd = socketFd;
-    event.events = EPOLLIN;
 
-    int ret = epoll_ctl(epollFd, EPOLL_CTL_ADD, socketFd, &event);
+    int ret = epoll_ctl(epollFd, EPOLL_CTL_ADD, socketFd, &eventListenFd);
     if (-1 == ret)
     {
         perror("epoll_ctl()");
@@ -74,39 +77,90 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
-    int maxEvents = 0;
-    int fdNum = 0;
-    while (true)
+    int i;
+    int fd;
+    int connFd;
+    socklen_t addrLen;
+    struct epoll_event ev;
+    bzero(&ev, sizeof(ev));
+    while (1)
     {
-        ret = epoll_wait(epollFd, &wait_event, maxEvents + 1, -1);
+        ret = epoll_wait(epollFd, events, MAX_EVENTS, -1);
 
-        if ((wait_event.data.fd == socketFd) &&
-                (EPOLLIN == wait_event.events))
+        for (i = 0; i < MAX_EVENTS; i++)
         {
-            int connFd = accept(socketFd, (struct sockaddr *)&clientAddr, &addrLen);
-            for (fdNum = 0; fdNum < OPEN_MAX; fdNum++)
-            {
-                if (fd[fdNum] < 0)
-                {
-                    fd[fdNum] = connFd;
-                    event.data.fd = connFd;
-                    event.events = EPOLLIN;
+            fd = events[i].data.fd;
 
-                    ret = epoll_ctl(epollFd, EPOLL_CTL_ADD, connFd, &event);
-                    if (-1 == ret)
-                    {
-                        perror("epoll_ctl()2");
-                        close(epollFd);
-                        exit(EXIT_FAILURE);
-                    }
-                    break;
+            if ((fd == socketFd) && (events[i].events & EPOLLIN))
+            {
+               connFd = accept(socketFd, (struct sockaddr *)&clientAddr, &addrLen);
+               if (connFd == -1)
+               {
+                   perror("accept()");
+                   continue;
+               }
+               else
+               {
+                   printf("Accept a new client: %s:%d\n", inet_ntoa(clientAddr.sin_addr), clientAddr.sin_port);
+                   ev.data.fd = connFd;
+                   ev.events = EPOLLIN;
+                   epoll_ctl(epollFd, EPOLL_CTL_ADD, connFd, &ev);
+               }
+            }
+            else if (events[i].events & EPOLLIN)
+            {
+                ret = read(fd, buf, BUF_SIZE);
+                if(ret == -1)
+                {
+                    perror("read()");
+                    close(fd);
+                    delete_event(epollFd, fd, EPOLLIN);
                 }
+                else if(ret == 0)
+                {
+                    fprintf(stderr, "Client closed.\n");
+                    close(fd);
+                    delete_event(epollFd, fd, EPOLLIN);
+                }
+                else
+                {
+                    printf("Read message: %s\n", buf);
+                    modify_event(epollFd, fd, EPOLLOUT);
+                }
+                bzero(buf, BUF_SIZE);
+
+            }
+            else if (events[i].events & EPOLLOUT)
+            {
+                ret = write(fd, buf, strlen(buf));
+                if (ret == -1)
+                {
+                    perror("write()");
+                    close(fd);
+                    delete_event(epollFd, fd, EPOLLOUT);
+                }
+                else
+                    modify_event(epollFd, fd, EPOLLIN);
+                bzero(buf, BUF_SIZE);
             }
         }
-
-        if (fdNum > maxEvents)
-            maxEvents = fdNum;
     }
 
     return 0;
+}
+
+void delete_event(int epollFd, int fd, int state)
+{
+    struct epoll_event ev;
+    ev.events = state;
+    ev.data.fd = fd;
+    epoll_ctl(epollFd, EPOLL_CTL_DEL, fd, &ev);
+}
+
+void modify_event(int epollFd, int fd, int state)
+{
+    struct epoll_event ev;
+    ev.events = state;
+    ev.data.fd = fd;
+    epoll_ctl(epollFd, EPOLL_CTL_MOD, fd, &ev);
 }
